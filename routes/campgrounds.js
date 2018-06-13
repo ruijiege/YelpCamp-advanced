@@ -6,6 +6,29 @@ var middleware = require("../middleware");
 var geocoder = require('geocoder');
 var { isLoggedIn, checkUserCampground, checkUserComment, isAdmin, isSafe } = middleware; // destructuring assignment
 
+var multer = require('multer');
+var storage = multer.diskStorage({
+  filename: function(req, file, callback) {
+    callback(null, Date.now() + file.originalname);
+  }
+});
+var imageFilter = function (req, file, cb) {
+    // accept image files only
+    if (!file.originalname.match(/\.(jpg|jpeg|png|gif)$/i)) {
+        return cb(new Error('Only image files are allowed!'), false);
+    }
+    cb(null, true);
+};
+var upload = multer({ storage: storage, fileFilter: imageFilter})
+
+var cloudinary = require('cloudinary');
+cloudinary.config({ 
+  cloud_name: 'jerry7ge', 
+  api_key: process.env.CLOUDINARY_API_KEY, 
+  api_secret: process.env.CLOUDINARY_API_SECRET
+});
+
+
 // Define escapeRegex function for search feature
 function escapeRegex(text) {
     return text.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, "\\$&");
@@ -40,10 +63,9 @@ router.get("/", function(req, res){
 });
 
 //CREATE - add new campground to DB
-router.post("/", isLoggedIn, isSafe, function(req, res){
+router.post("/", isLoggedIn, upload.single('image'), function(req, res) {
   // get data from form and add to campgrounds array
   var name = req.body.name;
-  var image = req.body.image;
   var desc = req.body.description;
   var author = {
       id: req.user._id,
@@ -58,16 +80,28 @@ router.post("/", isLoggedIn, isSafe, function(req, res){
     var lat = data.results[0].geometry.location.lat;
     var lng = data.results[0].geometry.location.lng;
     var location = data.results[0].formatted_address;
-    var newCampground = {name: name, image: image, description: desc, cost: cost, author:author, location: location, lat: lat, lng: lng};
-    // Create a new campground and save to DB
-    Campground.create(newCampground, function(err, newlyCreated){
-        if(err){
-            console.log(err);
-        } else {
-            //redirect back to campgrounds page
-            console.log(newlyCreated);
-            res.redirect("/campgrounds");
+    
+    cloudinary.v2.uploader.upload(req.file.path, function(err, result) {
+        if(err) {
+            req.flash('error', err.message);
+            return res.redirect('back');
         }
+        // add cloudinary url for the image to the campground object under image property
+        req.body.image = result.secure_url;
+        req.body.imageId = result.public_id;
+        var image = req.body.image;
+        var imageId = req.body.imageId;
+        var newCampground = {name: name, image: image, imageId: imageId, description: desc, cost: cost, author:author, location: location, lat: lat, lng: lng};
+        // Create a new campground and save to DB
+        Campground.create(newCampground, function(err, newlyCreated){
+            if(err){
+                console.log(err);
+            } else {
+                //redirect back to campgrounds page
+                console.log(newlyCreated);
+                res.redirect("/campgrounds");
+            }
+        });
     });
   });
 });
@@ -99,17 +133,34 @@ router.get("/:id/edit", isLoggedIn, checkUserCampground, function(req, res){
 });
 
 // PUT - updates campground in the database
-router.put("/:id", isSafe, function(req, res){
+router.put("/:id", upload.single('image'), function(req, res){
   geocoder.geocode(req.body.location, function (err, data) {
     var lat = data.results[0].geometry.location.lat;
     var lng = data.results[0].geometry.location.lng;
     var location = data.results[0].formatted_address;
-    var newData = {name: req.body.name, image: req.body.image, description: req.body.description, cost: req.body.cost, location: location, lat: lat, lng: lng};
-    Campground.findByIdAndUpdate(req.params.id, {$set: newData}, function(err, campground){
+    
+    Campground.findById(req.params.id, async function(err, campground){
         if(err){
             req.flash("error", err.message);
             res.redirect("back");
         } else {
+            if (req.file) {
+              try {
+                  await cloudinary.v2.uploader.destroy(campground.imageId);
+                  var result = await cloudinary.v2.uploader.upload(req.file.path);
+                  campground.imageId = result.public_id;
+                  campground.image = result.secure_url;
+              } catch(err) {
+                  req.flash("error", err.message);
+                  return res.redirect("back");
+              }
+            }
+            campground.name = req.body.name;
+            campground.description = req.body.description;
+            campground.location = location;
+            campground.lat = lat;
+            campground.lng = lng;
+            campground.save();
             req.flash("success","Successfully Updated!");
             res.redirect("/campgrounds/" + campground._id);
         }
@@ -118,26 +169,24 @@ router.put("/:id", isSafe, function(req, res){
 });
 
 // DELETE - removes campground and its comments from the database
-router.delete("/:id", isLoggedIn, checkUserCampground, function(req, res) {
-    Comment.remove({
-      _id: {
-        $in: req.campground.comments
-      }
-    }, function(err) {
-      if(err) {
-          req.flash('error', err.message);
-          res.redirect('/');
-      } else {
-          req.campground.remove(function(err) {
-            if(err) {
-                req.flash('error', err.message);
-                return res.redirect('/');
-            }
-            req.flash('error', 'Campground deleted!');
-            res.redirect('/campgrounds');
-          });
-      }
-    })
+router.delete('/:id', function(req, res) {
+  Campground.findById(req.params.id, async function(err, campground) {
+    if(err) {
+      req.flash("error", err.message);
+      return res.redirect("back");
+    }
+    try {
+        await cloudinary.v2.uploader.destroy(campground.imageId);
+        campground.remove();
+        req.flash('success', 'Campground deleted successfully!');
+        res.redirect('/campgrounds');
+    } catch(err) {
+        if(err) {
+          req.flash("error", err.message);
+          return res.redirect("back");
+        }
+    }
+  });
 });
 
 module.exports = router;
