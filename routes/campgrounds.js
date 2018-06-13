@@ -23,7 +23,7 @@ var upload = multer({ storage: storage, fileFilter: imageFilter})
 
 var cloudinary = require('cloudinary');
 cloudinary.config({ 
-  cloud_name: 'jerry7ge', 
+  cloud_name: process.env.CLOUD_NAME, 
   api_key: process.env.CLOUDINARY_API_KEY, 
   api_secret: process.env.CLOUDINARY_API_SECRET
 });
@@ -190,4 +190,3 @@ router.delete('/:id', function(req, res) {
 });
 
 module.exports = router;
-
